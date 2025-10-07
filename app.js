@@ -1,42 +1,70 @@
-const express = require('express');
-const multer = require('multer');
-const { Pool } = require('pg');
-const path = require('path');
-const fs = require('fs');
+// =====================================
+// Import module yang dibutuhkan
+// =====================================
+require("dotenv").config();
+const express = require("express");
+const multer = require("multer");
+const { Pool } = require("pg");
+const path = require("path");
+const fs = require("fs");
+const helmet = require("helmet");
+const morgan = require("morgan");
+const cors = require("cors");
 
+// =====================================
+// Inisialisasi aplikasi
+// =====================================
 const app = express();
 const PORT = process.env.PORT || 3000;
+const NODE_ENV = process.env.NODE_ENV || "development";
+const STORAGE_PATH = process.env.STORAGE_PATH || "./storage";
 
-// Middleware
+// =====================================
+// Middleware dasar
+// =====================================
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static('public'));
+app.use(cors());
+app.use(morgan(NODE_ENV === "production" ? "combined" : "dev"));
 
-// Ensure storage directory exists
-const STORAGE_PATH = process.env.STORAGE_PATH || './storage';
-if (!fs.existsSync(STORAGE_PATH)) {
-  fs.mkdirSync(STORAGE_PATH, { recursive: true });
-}
-app.use('/storage', express.static(STORAGE_PATH));
+// ✅ Middleware keamanan
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "https://cdn.tailwindcss.com"],
+        styleSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
+        imgSrc: ["'self'", "data:"],
+        connectSrc: ["'self'"],
+        fontSrc: ["'self'", "https:", "data:"],
+      },
+    },
+  })
+);
 
-// PostgreSQL Connection
+// ✅ Folder publik dan storage
+app.use(express.static(path.join(__dirname, "public")));
+app.use("/storage", express.static(STORAGE_PATH));
+
+// =====================================
+// Koneksi PostgreSQL
+// =====================================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
 
-// Test database connection
-pool.query('SELECT NOW()', (err, res) => {
-  if (err) {
-    console.error('Database connection error:', err);
-  } else {
-    console.log('Database connected successfully at:', res.rows[0].now);
-  }
-});
+pool
+  .connect()
+  .then(() => console.log("✅ Database connected successfully"))
+  .catch((err) => console.error("❌ Database connection error:", err.message));
 
-// Create users table if not exists
+// =====================================
+// Inisialisasi tabel database
+// =====================================
 const initDB = async () => {
-  const createTableQuery = `
+  const query = `
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
       name VARCHAR(255) NOT NULL,
@@ -45,263 +73,141 @@ const initDB = async () => {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `;
-  
   try {
-    await pool.query(createTableQuery);
-    console.log('Users table initialized');
+    await pool.query(query);
+    console.log("✅ Users table initialized successfully");
   } catch (err) {
-    console.error('Error creating table:', err);
+    console.error("❌ Error creating table:", err.message);
   }
 };
-
 initDB();
 
-// Configure Multer for file uploads
+// =====================================
+// Konfigurasi Upload
+// =====================================
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, STORAGE_PATH);
-  },
+  destination: (req, file, cb) => cb(null, STORAGE_PATH),
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  }
+    const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, unique + path.extname(file.originalname));
+  },
 });
 
 const upload = multer({
-  storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
-    
-    if (mimetype && extname) {
-      return cb(null, true);
-    } else {
-      cb(new Error('Only image files are allowed!'));
-    }
-  }
+    const allowed = /jpeg|jpg|png|gif/;
+    const isValid =
+      allowed.test(path.extname(file.originalname).toLowerCase()) &&
+      allowed.test(file.mimetype);
+    if (isValid) cb(null, true);
+    else cb(new Error("Only image files allowed (jpeg, jpg, png, gif)!"));
+  },
 });
 
-// Routes
+// =====================================
+// ROUTES
+// =====================================
 
-// Home page
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+// ✅ Root (serve index.html)
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-// Health check
-app.get('/health', async (req, res) => {
+// ✅ Check database
+app.get("/api/check-db", async (req, res) => {
   try {
-    const result = await pool.query('SELECT NOW()');
-    res.json({
-      status: 'healthy',
-      database: 'connected',
-      timestamp: result.rows[0].now,
-      storage_path: STORAGE_PATH
-    });
+    const result = await pool.query("SELECT NOW()");
+    res.json({ status: "ok", time: result.rows[0].now });
   } catch (err) {
-    res.status(500).json({
-      status: 'unhealthy',
-      database: 'disconnected',
-      error: err.message
-    });
+    res.status(500).json({ status: "error", message: err.message });
   }
 });
 
-// Get all users
-app.get('/api/users', async (req, res) => {
+// ✅ Ambil semua users
+app.get("/api/users", async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM users ORDER BY created_at DESC');
-    res.json({
-      success: true,
-      count: result.rows.length,
-      users: result.rows
-    });
+    const result = await pool.query("SELECT * FROM users ORDER BY created_at DESC");
+    res.json({ success: true, users: result.rows });
   } catch (err) {
-    console.error('Error fetching users:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Get user by ID
-app.get('/api/users/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const result = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'User not found'
-      });
-    }
-    
-    res.json({
-      success: true,
-      user: result.rows[0]
-    });
-  } catch (err) {
-    console.error('Error fetching user:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
-// Create new user
-app.post('/api/users', upload.single('photo'), async (req, res) => {
+// ✅ Tambah user
+app.post("/api/users", upload.single("photo"), async (req, res) => {
   try {
     const { name, email } = req.body;
-    
-    if (!name || !email) {
-      return res.status(400).json({
-        success: false,
-        error: 'Name and email are required'
-      });
-    }
-    
+    if (!name || !email)
+      return res.status(400).json({ success: false, error: "Name and email required" });
+
     const photoPath = req.file ? `/storage/${req.file.filename}` : null;
-    
     const result = await pool.query(
-      'INSERT INTO users (name, email, photo_path) VALUES ($1, $2, $3) RETURNING *',
+      "INSERT INTO users (name, email, photo_path) VALUES ($1, $2, $3) RETURNING *",
       [name, email, photoPath]
     );
-    
-    res.status(201).json({
-      success: true,
-      message: 'User created successfully',
-      user: result.rows[0]
-    });
+
+    res.status(201).json({ success: true, user: result.rows[0] });
   } catch (err) {
-    console.error('Error creating user:', err);
-    
-    // Delete uploaded file if database insert fails
-    if (req.file) {
-      fs.unlinkSync(req.file.path);
-    }
-    
-    if (err.code === '23505') { // Unique violation
-      return res.status(409).json({
-        success: false,
-        error: 'Email already exists'
-      });
-    }
-    
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    if (err.code === "23505")
+      return res.status(409).json({ success: false, error: "Email already exists" });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Update user
-app.put('/api/users/:id', upload.single('photo'), async (req, res) => {
+// ✅ Update user
+app.put("/api/users/:id", upload.single("photo"), async (req, res) => {
   try {
     const { id } = req.params;
     const { name, email } = req.body;
-    
-    // Get current user data
-    const currentUser = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
-    
-    if (currentUser.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'User not found'
-      });
-    }
-    
-    const photoPath = req.file ? `/storage/${req.file.filename}` : currentUser.rows[0].photo_path;
-    
-    const result = await pool.query(
-      'UPDATE users SET name = $1, email = $2, photo_path = $3 WHERE id = $4 RETURNING *',
-      [name || currentUser.rows[0].name, email || currentUser.rows[0].email, photoPath, id]
+
+    const current = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
+    if (current.rows.length === 0)
+      return res.status(404).json({ success: false, error: "User not found" });
+
+    const newPhoto = req.file
+      ? `/storage/${req.file.filename}`
+      : current.rows[0].photo_path;
+
+    const updated = await pool.query(
+      "UPDATE users SET name=$1, email=$2, photo_path=$3 WHERE id=$4 RETURNING *",
+      [name || current.rows[0].name, email || current.rows[0].email, newPhoto, id]
     );
-    
-    // Delete old photo if new one uploaded
-    if (req.file && currentUser.rows[0].photo_path) {
-      const oldPhotoPath = path.join(__dirname, currentUser.rows[0].photo_path);
-      if (fs.existsSync(oldPhotoPath)) {
-        fs.unlinkSync(oldPhotoPath);
-      }
-    }
-    
-    res.json({
-      success: true,
-      message: 'User updated successfully',
-      user: result.rows[0]
-    });
+
+    res.json({ success: true, user: updated.rows[0] });
   } catch (err) {
-    console.error('Error updating user:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Delete user
-app.delete('/api/users/:id', async (req, res) => {
+// ✅ Hapus user
+app.delete("/api/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // Get user data to delete photo
-    const user = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
-    
-    if (user.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'User not found'
-      });
-    }
-    
-    // Delete user from database
-    await pool.query('DELETE FROM users WHERE id = $1', [id]);
-    
-    // Delete photo file
-    if (user.rows[0].photo_path) {
-      const photoPath = path.join(__dirname, user.rows[0].photo_path);
-      if (fs.existsSync(photoPath)) {
-        fs.unlinkSync(photoPath);
-      }
-    }
-    
-    res.json({
-      success: true,
-      message: 'User deleted successfully'
-    });
+    const current = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
+    if (current.rows.length === 0)
+      return res.status(404).json({ success: false, error: "User not found" });
+
+    await pool.query("DELETE FROM users WHERE id=$1", [id]);
+    res.json({ success: true, message: "User deleted" });
   } catch (err) {
-    console.error('Error deleting user:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Error handling middleware
+// =====================================
+// Error handling
+// =====================================
 app.use((err, req, res, next) => {
-  console.error('Error:', err);
-  res.status(500).json({
-    success: false,
-    error: err.message
-  });
+  console.error("❌ Error:", err.message);
+  res.status(500).json({ success: false, error: err.message });
 });
 
-// Start server
+// =====================================
+// Jalankan server
+// =====================================
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Storage path: ${STORAGE_PATH}`);
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
-  pool.end(() => {
-    console.log('Database pool closed');
-  });
+  console.log(`🚀 Server running in ${NODE_ENV} mode on port ${PORT}`);
+  console.log(`📦 Storage directory: ${STORAGE_PATH}`);
 });
